@@ -80,15 +80,7 @@ def add_cors(resp):
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
 
-@app.route("/", methods=["GET", "POST", "OPTIONS"])
-def root_ok():
-    # Minimal descriptor so MCP clients are happy for both GET and POST
-    return jsonify({
-        "name": "sora-mcp",
-        "version": "1.0.0",
-        "message": "MCP proxy root. See /tools or /mcp/tools for tool catalog.",
-        "endpoints": {"tools": "/tools", "run": "/tools/call"}
-    }), 200
+
 
 @app.before_request
 def _log_and_auth():
@@ -110,15 +102,15 @@ def _log_and_auth():
 def health():
     return _ok({"ok": True, "status": "healthy"})
 
-@app.get("/")
+@app.route("/", methods=["GET", "POST", "OPTIONS"])
 def root_ok():
-    # Some clients probe root; return a minimal descriptor or the tools list.
-    return _ok({
+    # Minimal descriptor so MCP clients are happy for both GET and POST
+    return jsonify({
         "name": "sora-mcp",
         "version": "1.0.0",
         "message": "MCP proxy root. See /tools or /mcp/tools for tool catalog.",
         "endpoints": {"tools": "/tools", "run": "/tools/call"}
-    })
+    }), 200
 
 def _schema_payload():
     return {
