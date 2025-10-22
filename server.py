@@ -104,12 +104,16 @@ def health():
 
 @app.route("/", methods=["GET", "POST", "OPTIONS"])
 def root_ok():
-    # Minimal descriptor so MCP clients are happy for both GET and POST
     return jsonify({
         "name": "sora-mcp",
         "version": "1.0.0",
         "message": "MCP proxy root. See /tools or /mcp/tools for tool catalog.",
-        "endpoints": {"tools": "/tools", "run": "/tools/call"}
+        "schema_url": "/.well-known/mcp.json",   # 👈 tells Builder where schema is
+        "endpoints": {
+            "tools": "/tools",
+            "run": "/tools/call",
+            "schema": "/.well-known/mcp.json"
+        }
     }), 200
 
 def _schema_payload():
