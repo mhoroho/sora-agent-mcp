@@ -80,10 +80,15 @@ def add_cors(resp):
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
 
-@app.route("/<path:_p>", methods=["OPTIONS"])
-@app.route("/", methods=["OPTIONS"])
-def options_ok(_p=None):
-    return ("", 204)
+@app.route("/", methods=["GET", "POST", "OPTIONS"])
+def root_ok():
+    # Minimal descriptor so MCP clients are happy for both GET and POST
+    return jsonify({
+        "name": "sora-mcp",
+        "version": "1.0.0",
+        "message": "MCP proxy root. See /tools or /mcp/tools for tool catalog.",
+        "endpoints": {"tools": "/tools", "run": "/tools/call"}
+    }), 200
 
 @app.before_request
 def _log_and_auth():
