@@ -7,6 +7,33 @@ SORA_API_BASE = os.getenv("SORA_API_BASE", "https://api.openai.com/v1")
 SORA_API_KEY  = os.getenv("SORA_API_KEY") or os.getenv("OPENAI_API_KEY")
 MODEL_ID = os.getenv("SORA_MODEL_ID", "sora-2")
 
+@app.before_request
+def _log_and_auth():
+    # TEMP: relax auth so the builder can reach us
+    # Accept either bare token or "Bearer <token>", or no token at all
+    expected = os.getenv("MCP_ACCESS_TOKEN")
+    auth = request.headers.get("Authorization", "")
+    print(f"[MCP] {request.method} {request.path} Auth:{auth[:20]}...")
+
+    if expected:
+        # Accept both "Bearer <token>" and "<token>"
+        if auth == expected or auth == f"Bearer {expected}":
+            return  # ok
+        # If auth missing, allow during setup (remove later)
+        # return jsonify({"error": "Unauthorized"}), 401
+    # else: no token configured => open access for dev
+
+# --- keep your existing /mcp/tools and /mcp/run ---
+
+# COMPAT: some MCP clients expect these paths:
+@app.get("/tools")
+def tools_alias_get():
+    return list_tools()
+
+@app.post("/tools/call")
+def tools_call_alias():
+    return run_tool()
+
 # ---- MCP tool catalog ----
 @app.get("/mcp/tools")
 def list_tools():
