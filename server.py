@@ -34,6 +34,11 @@ def tools_alias_get():
 def tools_call_alias():
     return run_tool()
 
+@app.get("/")
+def root_ok():
+    # return a tiny descriptor or just your tools list
+    return list_tools()   # <- reuses your /mcp/tools handler
+
 # ---- MCP tool catalog ----
 @app.get("/mcp/tools")
 def list_tools():
