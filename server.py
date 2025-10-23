@@ -204,13 +204,16 @@ def add_cors(resp):
 
 from uuid import uuid4
 
+from flask import request, jsonify, make_response
+from uuid import uuid4
+
 @app.route("/", methods=["GET", "POST", "OPTIONS"])
 def root_jsonrpc():
     # CORS preflight
     if request.method == "OPTIONS":
         return ("", 204)
 
-    # Plain GET: still show a human-friendly descriptor
+    # Human-friendly GET for browsers
     if request.method == "GET":
         return _ok({
             "name": "sora-mcp",
@@ -219,52 +222,54 @@ def root_jsonrpc():
             "endpoints": {"tools": "/tools", "run": "/tools/call", "schema": "/.well-known/mcp.json"}
         })
 
-    # JSON-RPC 2.0 (POST)
     body = request.get_json(silent=True) or {}
     print("[MCP] / body:", body)
 
-    # Helper to return JSON-RPC responses
+    # Helpers
     def rpc_result(id_, result):
-        return make_response(jsonify({"jsonrpc": "2.0", "id": id_, "result": result}), 200)
+        resp = make_response(jsonify({"jsonrpc": "2.0", "id": id_, "result": result}), 200)
+        resp.headers["Content-Type"] = "application/json; charset=utf-8"
+        return resp
+
     def rpc_error(id_, code, message, data=None):
         payload = {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
         if data is not None:
             payload["error"]["data"] = data
-        return make_response(jsonify(payload), 200)
+        resp = make_response(jsonify(payload), 200)
+        resp.headers["Content-Type"] = "application/json; charset=utf-8"
+        return resp
 
-    # Validate basic envelope
+    # Not a JSON-RPC request? Show descriptor
     if body.get("jsonrpc") != "2.0" or "method" not in body:
-        # Fall back to descriptor for non-RPC clients
         return _ok({"name": "sora-mcp", "version": "1.0.0", "note": "POST JSON-RPC 2.0 to use MCP"})
 
     method = body["method"]
     id_ = body.get("id", str(uuid4()))
     params = body.get("params") or {}
 
-    # ---- MCP methods we handle ----
-
+    # 1) initialize
     if method == "initialize":
-        # Minimal MCP handshake response
-        # Echo protocolVersion back, advertise we support tools
-        proto = params.get("protocolVersion", "2025-03-26")
+        proto = params.get("protocolVersion", "2025-06-18")
         return rpc_result(id_, {
             "protocolVersion": proto,
             "serverInfo": {"name": "sora-mcp", "version": "1.0.0"},
             "capabilities": {
-                "tools": {},        # advertise tools capability
-                # add other caps if you later support them:
-                # "prompts": {}, "resources": {}, ...
+                "tools": {}  # advertise tools capability
             }
         })
 
+    # 1.1) notifications/initialized (notification → no id, no response body)
+    if method == "notifications/initialized":
+        return ("", 204)
+
+    # 2) tools/list  —> MUST return tools with inputSchema
     if method == "tools/list":
-        # Return tool list in JSON-RPC format
         tools = [
             {
                 "name": "start_sora_job",
                 "description": "Create a Sora video generation job",
-                # OpenAI-style JSON Schema for args
-                "parameters": {
+                "type": "function",
+                "inputSchema": {  # 👈 camelCase, JSON Schema for args
                     "type": "object",
                     "properties": {
                         "prompt": {"type": "string"},
@@ -280,17 +285,20 @@ def root_jsonrpc():
             {
                 "name": "get_sora_job",
                 "description": "Poll a Sora job and return status + asset URLs",
-                "parameters": {
+                "type": "function",
+                "inputSchema": {
                     "type": "object",
-                    "properties": {"job_id": {"type": "string"}},
+                    "properties": {
+                        "job_id": {"type": "string"}
+                    },
                     "required": ["job_id"]
                 }
             }
         ]
         return rpc_result(id_, {"tools": tools})
 
+    # 3) tools/call  —> dispatch to your Python functions and wrap result
     if method == "tools/call":
-        # params: { "name": "...", "arguments": {...} }
         name = params.get("name")
         arguments = params.get("arguments") or {}
         if not name:
@@ -298,19 +306,19 @@ def root_jsonrpc():
 
         try:
             if name == "start_sora_job":
-                result = start_sora_job(**arguments)  # uses your existing function
-                return rpc_result(id_, {"content": result})
+                result = start_sora_job(**arguments)
             elif name == "get_sora_job":
                 result = get_sora_job(**arguments)
-                return rpc_result(id_, {"content": result})
             else:
                 return rpc_error(id_, -32601, f"Unknown tool '{name}'")
+            # MCP JSON-RPC result shape:
+            return rpc_result(id_, {"content": result})
         except Exception as e:
-            # Return MCP-style tool error
             return rpc_error(id_, -32000, "Tool execution failed", {"message": str(e)})
 
     # Unknown method
     return rpc_error(id_, -32601, f"Method '{method}' not found")
+
 
 
 
