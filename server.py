@@ -1,130 +1,319 @@
+# server.py
 """
-Sora MCP (FastMCP) — quickstart-style server
-
-Run (stdio mode, like the quickstart):
-    uv run server sora_fastmcp stdio
+Flask + Gunicorn HTTP MCP server with FastMCP-style tools (no stdio).
+- Works on Render (Procfile uses gunicorn).
+- Exposes HTTP endpoints the Platform Builder probes.
 """
 
 import os
+import json
 from typing import Optional, Dict, Any
 
+from flask import Flask, request, jsonify, make_response
 import httpx
-from mcp.server.fastmcp import FastMCP
 
-# ---- Config via env ----
+# Optional: FastMCP for decorator style (we won't run mcp.run_stdio())
+try:
+    from mcp.server.fastmcp import FastMCP
+    _FASTMCP_AVAILABLE = True
+except Exception:
+    _FASTMCP_AVAILABLE = False
+
+app = Flask(__name__)
+
+# -----------------------------
+# Config (env)
+# -----------------------------
 SORA_API_BASE = os.getenv("SORA_API_BASE", "https://api.openai.com/v1")
 SORA_API_KEY  = os.getenv("SORA_API_KEY") or os.getenv("OPENAI_API_KEY")
 SORA_MODEL_ID = os.getenv("SORA_MODEL_ID", "sora-2")
+ACCESS_TOKEN  = os.getenv("MCP_ACCESS_TOKEN")  # optional bearer
 HTTP_TIMEOUT  = float(os.getenv("HTTP_TIMEOUT", "60"))
 
-# Create an MCP server
-mcp = FastMCP("Sora MCP")
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def _ok(data: Any, code: int = 200):
+    return make_response(jsonify(data), code)
+
+def _err(msg: str, code: int = 400):
+    return _ok({"ok": False, "error": msg}, code)
+
+def _safe_json(resp: httpx.Response) -> Any:
+    try:
+        return resp.json()
+    except json.JSONDecodeError:
+        return {"status_code": resp.status_code, "text": resp.text}
+
+def _start_job_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string"},
+            "duration": {"type": "number"},
+            "aspect_ratio": {"type": "string"},
+            "resolution": {"type": "string"},
+            "audio": {"type": "boolean"},
+            "negative_prompt": {"type": "string"},
+        },
+        "required": ["prompt"],
+    }
+
+def _get_job_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"job_id": {"type": "string"}},
+        "required": ["job_id"],
+    }
+
+def _tool_list_payload() -> Dict[str, Any]:
+    start_schema = _start_job_schema()
+    get_schema   = _get_job_schema()
+    return {
+        "tools": [
+            {
+                "name": "start_sora_job",
+                "description": "Create a Sora video generation job",
+                "type": "function",
+                "input_schema": start_schema,
+                "inputSchema": start_schema,     # camelCase mirror
+                "parameters": start_schema,      # OpenAI-style mirror
+            },
+            {
+                "name": "get_sora_job",
+                "description": "Poll a Sora job and return status + asset URLs",
+                "type": "function",
+                "input_schema": get_schema,
+                "inputSchema": get_schema,
+                "parameters": get_schema,
+            },
+        ]
+    }
 
 
-# ---- Tools ----
+# -----------------------------
+# (Optional) FastMCP-style tool defs
+# -----------------------------
+if _FASTMCP_AVAILABLE:
+    mcp = FastMCP("Sora MCP")
 
-@mcp.tool()
-def start_sora_job(
-    prompt: str,
-    duration: float = 12,
-    aspect_ratio: str = "16:9",
-    resolution: str = "1080p",
-    audio: bool = True,
-    negative_prompt: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Create a Sora video generation job.
-    Returns upstream JSON (job id/status/etc.).
-    """
-    if not SORA_API_KEY:
-        raise RuntimeError("Missing SORA_API_KEY or OPENAI_API_KEY")
+    @mcp.tool()
+    def start_sora_job(
+        prompt: str,
+        duration: float = 12,
+        aspect_ratio: str = "16:9",
+        resolution: str = "1080p",
+        audio: bool = True,
+        negative_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not SORA_API_KEY:
+            raise RuntimeError("Missing SORA_API_KEY or OPENAI_API_KEY")
+
+        payload = {
+            "model": SORA_MODEL_ID,
+            "prompt": prompt,
+            "duration": duration,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "audio": audio,
+            "negative_prompt": negative_prompt,
+        }
+        headers = {
+            "Authorization": f"Bearer {SORA_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            r = client.post(f"{SORA_API_BASE}/video/jobs", headers=headers, json=payload)
+            return _safe_json(r)
+
+    @mcp.tool()
+    def get_sora_job(job_id: str) -> Dict[str, Any]:
+        if not SORA_API_KEY:
+            raise RuntimeError("Missing SORA_API_KEY or OPENAI_API_KEY")
+        headers = {"Authorization": f"Bearer {SORA_API_KEY}"}
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            r = client.get(f"{SORA_API_BASE}/video/jobs/{job_id}", headers=headers)
+            data = _safe_json(r)
+        assets = (data.get("output") or {}).get("assets") or []
+        video_url = (assets[0] or {}).get("url") if assets else None
+        return {
+            "status": data.get("status"),
+            "progress": data.get("progress"),
+            "video_url": video_url,
+            "thumbnail_url": (data.get("output") or {}).get("thumbnail_url"),
+            "raw": data,
+        }
+else:
+    # Fallback: define same functions directly (no FastMCP installed)
+    def start_sora_job(**kwargs) -> Dict[str, Any]:
+        prompt = kwargs.get("prompt")
+        if not prompt:
+            raise RuntimeError("start_sora_job requires 'prompt'")
+        duration = kwargs.get("duration", 12)
+        aspect_ratio = kwargs.get("aspect_ratio", "16:9")
+        resolution = kwargs.get("resolution", "1080p")
+        audio = kwargs.get("audio", True)
+        negative_prompt = kwargs.get("negative_prompt")
+
+        headers = {
+            "Authorization": f"Bearer {SORA_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": SORA_MODEL_ID,
+            "prompt": prompt,
+            "duration": duration,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "audio": audio,
+            "negative_prompt": negative_prompt,
+        }
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            r = client.post(f"{SORA_API_BASE}/video/jobs", headers=headers, json=payload)
+            return _safe_json(r)
+
+    def get_sora_job(**kwargs) -> Dict[str, Any]:
+        job_id = kwargs.get("job_id")
+        if not job_id:
+            raise RuntimeError("get_sora_job requires 'job_id'")
+        headers = {"Authorization": f"Bearer {SORA_API_KEY}"}
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            r = client.get(f"{SORA_API_BASE}/video/jobs/{job_id}", headers=headers)
+            data = _safe_json(r)
+        assets = (data.get("output") or {}).get("assets") or []
+        video_url = (assets[0] or {}).get("url") if assets else None
+        return {
+            "status": data.get("status"),
+            "progress": data.get("progress"),
+            "video_url": video_url,
+            "thumbnail_url": (data.get("output") or {}).get("thumbnail_url"),
+            "raw": data,
+        }
+
+
+# -----------------------------
+# CORS + Auth + Logging
+# -----------------------------
+@app.after_request
+def add_cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return resp
+
+@app.route("/", methods=["GET", "POST", "OPTIONS"])
+def root_descriptor():
+    auth = request.headers.get("Authorization", "")
+    print(f"[MCP] {request.method} {request.path} Auth:{auth[:20]}...")
 
     payload = {
-        "model": SORA_MODEL_ID,
-        "prompt": prompt,
-        "duration": duration,
-        "aspect_ratio": aspect_ratio,
-        "resolution": resolution,
-        "audio": audio,
-        "negative_prompt": negative_prompt,
+        "name": "sora-mcp",
+        "version": "1.0.0",
+        "message": "MCP proxy root. Tool catalog included inline.",
+        "schema_url": "/.well-known/mcp.json",
+        "endpoints": {"tools": "/tools", "run": "/tools/call", "schema": "/.well-known/mcp.json"},
+        "tools": _tool_list_payload()["tools"],
     }
+    resp = make_response(jsonify(payload), 200)
+    resp.headers["X-MCP-Server"] = "true"
+    return resp
 
-    headers = {
-        "Authorization": f"Bearer {SORA_API_KEY}",
-        "Content-Type": "application/json",
-    }
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return _ok({"ok": True, "status": "healthy"})
 
-    with httpx.Client(timeout=HTTP_TIMEOUT) as client:
-        r = client.post(f"{SORA_API_BASE}/video/jobs", headers=headers, json=payload)
-        r.raise_for_status()
-        return r.json()
+def _require_auth_for_exec() -> Optional[Any]:
+    # Public read-only endpoints:
+    if request.method == "OPTIONS" or request.path in {
+        "/", "/healthz", "/tools", "/mcp/tools", "/schema.json", "/.well-known/mcp.json"
+    }:
+        return None
+    # Execution endpoints require token if set:
+    if ACCESS_TOKEN:
+        auth = request.headers.get("Authorization", "")
+        if auth == ACCESS_TOKEN or auth == f"Bearer {ACCESS_TOKEN}":
+            return None
+        return _err("Unauthorized", 401)
+    return None
 
+@app.get("/schema.json")
+def schema_json():
+    return _ok({
+        "name": "sora-mcp",
+        "version": "1.0.0",
+        "endpoints": {"tools": "/tools", "run": "/tools/call"},
+        "tools": [t["name"] for t in _tool_list_payload()["tools"]],
+    })
 
-@mcp.tool()
-def get_sora_job(job_id: str) -> Dict[str, Any]:
-    """
-    Poll a Sora job and return normalized status + asset URLs.
-    """
-    if not SORA_API_KEY:
-        raise RuntimeError("Missing SORA_API_KEY or OPENAI_API_KEY")
-
-    headers = {"Authorization": f"Bearer {SORA_API_KEY}"}
-
-    with httpx.Client(timeout=HTTP_TIMEOUT) as client:
-        r = client.get(f"{SORA_API_BASE}/video/jobs/{job_id}", headers=headers)
-        r.raise_for_status()
-        data = r.json()
-
-    # Normalize a few useful fields while returning the raw too
-    video_url = None
-    assets = (data.get("output") or {}).get("assets") or []
-    if assets and isinstance(assets, list):
-        video_url = (assets[0] or {}).get("url")
-
-    return {
-        "status": data.get("status"),
-        "progress": data.get("progress"),
-        "video_url": video_url,
-        "thumbnail_url": (data.get("output") or {}).get("thumbnail_url"),
-        "raw": data,
-    }
+@app.get("/.well-known/mcp.json")
+def well_known_schema():
+    return schema_json()
 
 
-# ---- Optional: an example resource (not required) ----
+# -----------------------------
+# Catalog endpoints
+# -----------------------------
+@app.get("/tools")
+def tools_alias_get():
+    return _ok(_tool_list_payload())
 
-@mcp.resource("sora://job/{job_id}")
-def sora_job_resource(job_id: str) -> str:
-    """A small resource example that formats a status lookup hint."""
-    return f"Use get_sora_job with job_id={job_id} to retrieve status and assets."
-
-
-# ---- Optional: a prompt helper (not required) ----
-
-@mcp.prompt()
-def build_sora_prompt(
-    scene: str,
-    camera: str = "static",
-    duration: float = 12,
-    aspect_ratio: str = "16:9",
-    resolution: str = "1080p",
-    audio: bool = True,
-    negatives: str = "",
-) -> str:
-    """Generate a structured Sora prompt directive from parts."""
-    lines = [
-        f"Scene: {scene}",
-        f"Camera/motion: {camera}",
-        f"Duration: {duration}s",
-        f"Aspect ratio: {aspect_ratio}",
-        f"Resolution: {resolution}",
-        f"Audio: {'on' if audio else 'off'}",
-    ]
-    if negatives:
-        lines.append(f"Negative constraints: {negatives}")
-    return "\n".join(lines)
+@app.get("/mcp/tools")
+def tools_mcp_get():
+    return tools_alias_get()
 
 
-# ---- Entrypoint (stdio, like the quickstart) ----
+# -----------------------------
+# Execute endpoints
+# -----------------------------
+@app.post("/tools/call")
+def tools_call_alias():
+    maybe = _require_auth_for_exec()
+    if maybe is not None:
+        return maybe
+    return _run_tool_impl()
+
+@app.post("/mcp/run")
+def mcp_run():
+    maybe = _require_auth_for_exec()
+    if maybe is not None:
+        return maybe
+    return _run_tool_impl()
+
+def _run_tool_impl():
+    auth = request.headers.get("Authorization", "")
+    print(f"[MCP] {request.method} {request.path} Auth:{auth[:20]}...")
+
+    try:
+        body = request.get_json(force=True) or {}
+    except Exception:
+        return _err("Invalid JSON body", 400)
+
+    name = body.get("name") or body.get("tool")
+    args  = body.get("arguments") or body.get("input") or {}
+
+    if not name:
+        return _err("Missing 'name' (tool)", 400)
+
+    try:
+        if name == "start_sora_job":
+            # call the decorated function (if FastMCP is installed) or fallback impl
+            result = start_sora_job(**args) if _FASTMCP_AVAILABLE else start_sora_job(**args)
+            return _ok({"ok": True, "result": result})
+        elif name == "get_sora_job":
+            result = get_sora_job(**args) if _FASTMCP_AVAILABLE else get_sora_job(**args)
+            return _ok({"ok": True, "result": result})
+        else:
+            return _err(f"Unknown tool '{name}'", 404)
+
+    except httpx.HTTPError as e:
+        return _err(f"Upstream error: {str(e)}", 502)
+    except Exception as e:
+        return _err(str(e), 400)
+
+
+# -----------------------------
+# Local dev entry (optional)
+# -----------------------------
 if __name__ == "__main__":
-    # runs an MCP stdio server (the same mode used in the quickstart snippet)
-    mcp.run_stdio()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
