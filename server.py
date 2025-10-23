@@ -202,65 +202,116 @@ def add_cors(resp):
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
 
+from uuid import uuid4
+
 @app.route("/", methods=["GET", "POST", "OPTIONS"])
-def root_descriptor():
-    # (optional) see what the client posted
-    try:
-        print("[MCP] / body:", request.get_json(silent=True))
-    except Exception:
-        pass
+def root_jsonrpc():
+    # CORS preflight
+    if request.method == "OPTIONS":
+        return ("", 204)
 
-    # Build the minimal, everything-in-one handshake payload
-    tools = [
-        {
-            "name": "start_sora_job",
-            "description": "Create a Sora video generation job",
-            "type": "function",
-            # Many MCP clients accept OpenAI-style "parameters"
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {"type": "string"},
-                    "duration": {"type": "number"},
-                    "aspect_ratio": {"type": "string"},
-                    "resolution": {"type": "string"},
-                    "audio": {"type": "boolean"},
-                    "negative_prompt": {"type": "string"}
-                },
-                "required": ["prompt"]
+    # Plain GET: still show a human-friendly descriptor
+    if request.method == "GET":
+        return _ok({
+            "name": "sora-mcp",
+            "version": "1.0.0",
+            "message": "MCP over HTTP (JSON-RPC 2.0). POST JSON-RPC to this endpoint.",
+            "endpoints": {"tools": "/tools", "run": "/tools/call", "schema": "/.well-known/mcp.json"}
+        })
+
+    # JSON-RPC 2.0 (POST)
+    body = request.get_json(silent=True) or {}
+    print("[MCP] / body:", body)
+
+    # Helper to return JSON-RPC responses
+    def rpc_result(id_, result):
+        return make_response(jsonify({"jsonrpc": "2.0", "id": id_, "result": result}), 200)
+    def rpc_error(id_, code, message, data=None):
+        payload = {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+        if data is not None:
+            payload["error"]["data"] = data
+        return make_response(jsonify(payload), 200)
+
+    # Validate basic envelope
+    if body.get("jsonrpc") != "2.0" or "method" not in body:
+        # Fall back to descriptor for non-RPC clients
+        return _ok({"name": "sora-mcp", "version": "1.0.0", "note": "POST JSON-RPC 2.0 to use MCP"})
+
+    method = body["method"]
+    id_ = body.get("id", str(uuid4()))
+    params = body.get("params") or {}
+
+    # ---- MCP methods we handle ----
+
+    if method == "initialize":
+        # Minimal MCP handshake response
+        # Echo protocolVersion back, advertise we support tools
+        proto = params.get("protocolVersion", "2025-03-26")
+        return rpc_result(id_, {
+            "protocolVersion": proto,
+            "serverInfo": {"name": "sora-mcp", "version": "1.0.0"},
+            "capabilities": {
+                "tools": {},        # advertise tools capability
+                # add other caps if you later support them:
+                # "prompts": {}, "resources": {}, ...
             }
-        },
-        {
-            "name": "get_sora_job",
-            "description": "Poll a Sora job and return status + asset URLs",
-            "type": "function",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"}
-                },
-                "required": ["job_id"]
+        })
+
+    if method == "tools/list":
+        # Return tool list in JSON-RPC format
+        tools = [
+            {
+                "name": "start_sora_job",
+                "description": "Create a Sora video generation job",
+                # OpenAI-style JSON Schema for args
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "duration": {"type": "number"},
+                        "aspect_ratio": {"type": "string"},
+                        "resolution": {"type": "string"},
+                        "audio": {"type": "boolean"},
+                        "negative_prompt": {"type": "string"}
+                    },
+                    "required": ["prompt"]
+                }
+            },
+            {
+                "name": "get_sora_job",
+                "description": "Poll a Sora job and return status + asset URLs",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string"}},
+                    "required": ["job_id"]
+                }
             }
-        }
-    ]
+        ]
+        return rpc_result(id_, {"tools": tools})
 
-    payload = {
-        "name": "sora-mcp",
-        "version": "1.0.0",
-        # tell the client where it *could* call next (even if it won't)
-        "endpoints": {
-            "tools": "/tools",
-            "run": "/tools/call",
-            "schema": "/.well-known/mcp.json"
-        },
-        # 🔑 inline tools here so no /tools fetch is needed
-        "tools": tools
-    }
+    if method == "tools/call":
+        # params: { "name": "...", "arguments": {...} }
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        if not name:
+            return rpc_error(id_, -32602, "Missing 'name' in tools/call params")
 
-    resp = make_response(jsonify(payload), 200)
-    resp.headers["Content-Type"] = "application/json; charset=utf-8"
-    resp.headers["X-MCP-Server"] = "true"
-    return resp
+        try:
+            if name == "start_sora_job":
+                result = start_sora_job(**arguments)  # uses your existing function
+                return rpc_result(id_, {"content": result})
+            elif name == "get_sora_job":
+                result = get_sora_job(**arguments)
+                return rpc_result(id_, {"content": result})
+            else:
+                return rpc_error(id_, -32601, f"Unknown tool '{name}'")
+        except Exception as e:
+            # Return MCP-style tool error
+            return rpc_error(id_, -32000, "Tool execution failed", {"message": str(e)})
+
+    # Unknown method
+    return rpc_error(id_, -32601, f"Method '{method}' not found")
+
 
 
 @app.route("/healthz", methods=["GET"])
