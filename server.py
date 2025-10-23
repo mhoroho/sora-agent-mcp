@@ -8,7 +8,7 @@ Flask + Gunicorn HTTP MCP server with FastMCP-style tools (no stdio).
 import os
 import json
 from typing import Optional, Dict, Any
-
+from uuid import uuid4
 from flask import Flask, request, jsonify, make_response
 import httpx
 
