@@ -204,20 +204,64 @@ def add_cors(resp):
 
 @app.route("/", methods=["GET", "POST", "OPTIONS"])
 def root_descriptor():
-    auth = request.headers.get("Authorization", "")
-    print(f"[MCP] {request.method} {request.path} Auth:{auth[:20]}...")
+    # (optional) see what the client posted
+    try:
+        print("[MCP] / body:", request.get_json(silent=True))
+    except Exception:
+        pass
+
+    # Build the minimal, everything-in-one handshake payload
+    tools = [
+        {
+            "name": "start_sora_job",
+            "description": "Create a Sora video generation job",
+            "type": "function",
+            # Many MCP clients accept OpenAI-style "parameters"
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "duration": {"type": "number"},
+                    "aspect_ratio": {"type": "string"},
+                    "resolution": {"type": "string"},
+                    "audio": {"type": "boolean"},
+                    "negative_prompt": {"type": "string"}
+                },
+                "required": ["prompt"]
+            }
+        },
+        {
+            "name": "get_sora_job",
+            "description": "Poll a Sora job and return status + asset URLs",
+            "type": "function",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"}
+                },
+                "required": ["job_id"]
+            }
+        }
+    ]
 
     payload = {
         "name": "sora-mcp",
         "version": "1.0.0",
-        "message": "MCP proxy root. Tool catalog included inline.",
-        "schema_url": "/.well-known/mcp.json",
-        "endpoints": {"tools": "/tools", "run": "/tools/call", "schema": "/.well-known/mcp.json"},
-        "tools": _tool_list_payload()["tools"],
+        # tell the client where it *could* call next (even if it won't)
+        "endpoints": {
+            "tools": "/tools",
+            "run": "/tools/call",
+            "schema": "/.well-known/mcp.json"
+        },
+        # 🔑 inline tools here so no /tools fetch is needed
+        "tools": tools
     }
+
     resp = make_response(jsonify(payload), 200)
+    resp.headers["Content-Type"] = "application/json; charset=utf-8"
     resp.headers["X-MCP-Server"] = "true"
     return resp
+
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
