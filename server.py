@@ -124,7 +124,7 @@ if _FASTMCP_AVAILABLE:
             "Content-Type": "application/json",
         }
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
-            r = client.post(f"{SORA_API_BASE}/video/jobs", headers=headers, json=payload)
+            r = client.post(f"{SORA_API_BASE}/videos", headers=headers, json=payload)
             return _safe_json(r)
 
     @mcp.tool()
@@ -170,7 +170,7 @@ else:
             "negative_prompt": negative_prompt,
         }
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
-            r = client.post(f"{SORA_API_BASE}/video/jobs", headers=headers, json=payload)
+            r = client.post(f"{SORA_API_BASE}/videos", headers=headers, json=payload)
             return _safe_json(r)
 
     def get_sora_job(**kwargs) -> Dict[str, Any]:
