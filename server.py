@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any
 from uuid import uuid4
 from flask import Flask, request, jsonify, make_response
 import httpx
+import openai
 
 # Optional: FastMCP for decorator style (we won't run mcp.run_stdio())
 try:
@@ -123,9 +124,18 @@ if _FASTMCP_AVAILABLE:
             "Authorization": f"Bearer {SORA_API_KEY}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
-            r = client.post(f"{SORA_API_BASE}/videos", headers=headers, json=payload)
-            return _safe_json(r)
+        openai.api_key = SORA_API_KEY
+        response = openai.video.generation.create(
+            model = "sora-2",
+            prompt = prompt,
+            duration = duration,
+            aspect_ratio = aspect_ratio
+        )
+
+        video_job_id = response.id
+        return video_job_id
+        
+
 
     @mcp.tool()
     def get_sora_job(job_id: str) -> Dict[str, Any]:
